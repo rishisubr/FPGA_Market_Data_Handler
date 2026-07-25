@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+<testsuite timestamp="2026-07-25T15:24:55" hostname="MacBook-Pro-293.lan" package="msg_decoder" id="0" name="default" tests="1" errors="1" failures="0" time="0" skipped="0">
+<properties>
+<property name="os" value="Darwin"/>
+<property name="expect" value="PASS"/>
+<property name="status" value="ERROR"/>
+</properties>
+<testcase classname="default" name="default" time="0">
+<error type="ERROR"/>
+</testcase>
+<system-out>SBY 15:24:55 [msg_decoder] Removing directory '/Users/rishisubramanian/Desktop/Education/Projects/SystemVerilog_Projects/itch_feed_handler/msg_decoder'.
+SBY 15:24:55 [msg_decoder] Copy '/Users/rishisubramanian/Desktop/Education/Projects/SystemVerilog_Projects/itch_feed_handler/itch_lite_pkg.sv' to '/Users/rishisubramanian/Desktop/Education/Projects/SystemVerilog_Projects/itch_feed_handler/msg_decoder/src/itch_lite_pkg.sv'.
+SBY 15:24:55 [msg_decoder] Copy '/Users/rishisubramanian/Desktop/Education/Projects/SystemVerilog_Projects/itch_feed_handler/msg_decoder.sv' to '/Users/rishisubramanian/Desktop/Education/Projects/SystemVerilog_Projects/itch_feed_handler/msg_decoder/src/msg_decoder.sv'.
+SBY 15:24:55 [msg_decoder] engine_0: smtbmc boolector
+SBY 15:24:55 [msg_decoder] base: starting process &quot;cd msg_decoder/src; yosys -ql ../model/design.log ../model/design.ys&quot;
+SBY 15:24:55 [msg_decoder] base: msg_decoder.sv:24: ERROR: syntax error, unexpected ';', expecting '(' or '['
+SBY 15:24:55 [msg_decoder] base: finished (returncode=1)
+SBY 15:24:55 [msg_decoder] base: task failed. ERROR.
+SBY 15:24:55 [msg_decoder] summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY 15:24:55 [msg_decoder] summary: Elapsed process time [H:MM:SS (secs)]: 0:00:00 (0)
+SBY 15:24:55 [msg_decoder] summary: engine_0 (smtbmc boolector) did not return a status
+SBY 15:24:55 [msg_decoder] summary: engine_0 did not produce any traces
+SBY 15:24:55 [msg_decoder] DONE (ERROR, rc=16)
+</system-out>
+<system-err>
+</system-err>
+</testsuite>
+</testsuites>

@@ -40,6 +40,7 @@ verilator --lint-only -Wall itch_lite_pkg.sv msg_decoder.sv
 
 # View waveform
 surfer dump.vcd
+```
 
 ### SystemVerilog Assertions & Formal Verification
 
