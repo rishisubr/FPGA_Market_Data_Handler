@@ -1,4 +1,6 @@
 sim
 sim_rand
+sim_err
+test_results.txt
 dump.vcd
 msd_decoder/

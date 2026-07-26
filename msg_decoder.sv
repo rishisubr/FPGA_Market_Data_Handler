@@ -3,163 +3,236 @@ import itch_lite_pkg::*;
 /* verilator lint_on IMPORTSTAR */
 
 module msg_decoder (
+    input  logic        clk,
+    input  logic        rst_n,
 
-    input logic         clk,
-    input logic         rst_n,
-    input logic         in_valid,
-    input logic [7:0]   in_byte,
+    // AXI-Stream Slave
+    input  logic [63:0] s_axis_tdata,
+    input  logic        s_axis_tvalid,
+    input  logic [7:0]  s_axis_tkeep,
+    input  logic        s_axis_tlast,
+    output logic        s_axis_tready,
 
-    // Streaming decoded outputs as soon as their byte chunk completes
-    output logic        msg_start,      // high for 1 cycle when byte 0 arrives
-    output logic [7:0]  msg_type_raw,       // latched message type
+    // Control input and outputs
+    input  logic        m_axis_tready,  // downstream readiness
+    output logic        msg_start,
+    output logic        header_valid,
+    output logic        msg_done,
+    output logic        framing_error,
 
-    output logic        header_valid,   // high for 1 cycle when bytes 1-18 complete
-    output logic[15:0]  stock_locate,
-    output logic[15:0]  tracking_number,
-    output logic[47:0]  timestamp,
-    output logic[63:0]  order_ref,
-
-    output [95:0]       payload_raw,
-    output logic        msg_done        // high for 1 cycle when the full message completes
+    // Decoded event output (plain logic for Yosys compatibility)
+    output logic [287:0] order_event_raw
 );
 
-    // Custom type internal signals – connect to outputs
-    msg_type_e  msg_type;
-    payload_u   payload;
-    
-    assign msg_type_raw = msg_type;
-    assign payload_raw = payload;
-
-    // Byte position tracker within the current message
-    logic [7:0] byte_cnt;
-    logic [7:0] current_msg_len;
+    // Internal typed signal; assign to flat output at boundary
+    order_event_t order_event;
+    assign order_event_raw = order_event;
 
     // ------------------------------------------------------------------------
-    // Message length lookup
+    // Internal Registers
     // ------------------------------------------------------------------------
+    logic [7:0]  byte_cnt;
+    logic [63:0] prev_tdata;
+
+    // ------------------------------------------------------------------------
+    // AXI Helpers & 128-bit Sliding Window
+    // ------------------------------------------------------------------------
+    assign s_axis_tready = m_axis_tready && rst_n;
+
+    logic [3:0] bytes_in_word;
+    assign bytes_in_word = $countones(s_axis_tkeep);
+
+    logic [8:0] total_bytes;
+    assign total_bytes = byte_cnt + {5'b0, bytes_in_word};
+
+    // Window: prev_tdata in [63:0], incoming tdata in [127:64]
+    // byte 0 of the current word is at window[(byte_cnt_offset + 8)*8 +: 8]
+    logic [127:0] window;
+    assign window = {s_axis_tdata, prev_tdata};
+
+    // ------------------------------------------------------------------------
+    // Combinational Processes
+    // ------------------------------------------------------------------------
+    // Peek ahead at wire on first word, otherwise use latched msg_type
+    msg_type_e active_msg_type;
     always_comb begin
-        case (msg_type)
-            MSG_ADD:        current_msg_len = ADD_LEN;
-            MSG_CANCEL:     current_msg_len = CANCEL_LEN;
-            MSG_EXECUTE:    current_msg_len = EXECUTE_LEN;
-            default:        current_msg_len = '0; // unsupported message type
+        if (byte_cnt == 0 && total_bytes >= 1)
+            active_msg_type = msg_type_e'(window[71:64]);
+        else
+            active_msg_type = order_event.msg_type;
+    end
+    
+    // Message length lookup
+    logic [7:0]  current_msg_len;
+    always_comb begin
+        case (active_msg_type)
+            MSG_ADD:     current_msg_len = ADD_LEN;
+            MSG_CANCEL:  current_msg_len = CANCEL_LEN;
+            MSG_EXECUTE: current_msg_len = EXECUTE_LEN;
+            default:     current_msg_len = '0;
         endcase
     end
 
+    // Update for byte_cnt
+    logic [8:0]  byte_cnt_next;
+    assign byte_cnt_next = total_bytes - {1'b0, current_msg_len};
+
     // ------------------------------------------------------------------------
-    // Header (bytes 1-18), payload (bytes 19+)
-    //
-    // Payload fields are assembled by shift-and-append: each new byte shifts 
-    // the field left by 8 and appends the new byte at the bottom b/c wire is 
-    // big-endian.
+    // Error Handling
+    // ------------------------------------------------------------------------
+    logic framing_error_now;
+    assign framing_error_now = s_axis_tvalid && s_axis_tready && s_axis_tlast 
+                                && (total_bytes < {1'b0, current_msg_len});
+
+    // ------------------------------------------------------------------------
+    // Sequential Process
     // ------------------------------------------------------------------------
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            byte_cnt        <= '0;
-            msg_type        <= msg_type_e'('0);
-            msg_start       <= '0;
-            stock_locate    <= '0;
-            tracking_number <= '0;
-            timestamp       <= '0;
-            order_ref       <= '0;
-            header_valid    <= '0;
-            payload         <= '0;
-            msg_done        <= '0;
+            byte_cnt      <= '0;
+            prev_tdata    <= '0;
+            msg_start     <= '0;
+            header_valid  <= '0;
+            msg_done      <= '0;
+            framing_error <= '0;
+            order_event   <= '0;
         end else begin
-            msg_start    <= '0;
-            header_valid <= '0;
-            msg_done     <= '0; // default pulse low
+            msg_start     <= '0;
+            header_valid  <= '0;
+            msg_done      <= '0;
+            framing_error <= '0;
+            if (msg_done) order_event <= '0;
 
-            if (in_valid) begin
-                // Byte 0: message type start
-                if (byte_cnt == 0) begin
-                    msg_type  <= msg_type_e'(in_byte);
+            if (s_axis_tvalid && s_axis_tready) begin
+                prev_tdata <= s_axis_tdata;
+
+                // ------------------------------------------------------------
+                // 1. Start pulse on first byte of new message
+                // ------------------------------------------------------------
+                if (byte_cnt == 0 && total_bytes >= 1)
                     msg_start <= 1'b1;
+
+                // ------------------------------------------------------------
+                // 2. Field extraction from sliding window
+                //    Formula: window[((offset - byte_cnt + 8) * 8) +: width]
+                //    The +8 accounts for prev_tdata occupying window[63:0];
+                //    s_axis_tdata occupies window[127:64], so byte 0 of the
+                //    current incoming word is window[64 +: 8] = tdata[7:0].
+                // ------------------------------------------------------------
+
+                // msg_type (offset 0, 8 bits)
+                if (byte_cnt < 1 && total_bytes >= 1)
+                    order_event.msg_type <= msg_type_e'(window[((0 - byte_cnt + 8) * 8) +: 8]);
+
+                // stock_locate (offset 1, 16 bits)
+                if (byte_cnt < 3 && total_bytes >= 3)
+                    order_event.stock_locate <= bswap16(window[((1 - byte_cnt + 8) * 8) +: 16]);
+
+                // tracking_number (offset 3, 16 bits)
+                if (byte_cnt < 5 && total_bytes >= 5)
+                    order_event.tracking_number <= bswap16(window[((3 - byte_cnt + 8) * 8) +: 16]);
+
+                // timestamp (offset 5, 48 bits)
+                if (byte_cnt < 11 && total_bytes >= 11)
+                    order_event.timestamp <= bswap48(window[((5 - byte_cnt + 8) * 8) +: 48]);
+
+                // order_ref (offset 11, 64 bits) — header complete when this lands
+                if (byte_cnt < 19 && total_bytes >= 19) begin
+                    order_event.order_ref <= bswap64(window[((11 - byte_cnt + 8) * 8) +: 64]);
+                    header_valid          <= 1'b1;
                 end
 
-                // Bytes 1-18: common header – direct bit slicing
-                if      (byte_cnt >= 1  && byte_cnt <= 2)  stock_locate[(2 - byte_cnt) * 8 +: 8]     <= in_byte;
-                else if (byte_cnt >= 3  && byte_cnt <= 4)  tracking_number[(4 - byte_cnt) * 8 +: 8]  <= in_byte;
-                else if (byte_cnt >= 5  && byte_cnt <= 10) timestamp[(10 - byte_cnt) * 8 +: 8]       <= in_byte;
-                else if (byte_cnt >= 11 && byte_cnt <= 18) order_ref[(18 - byte_cnt) * 8 +: 8]       <= in_byte;
-
-                // Byte 18: pulse header_valid
-                if (byte_cnt == 18) begin
-                    header_valid <= 1'b1;
-                end
-
-                // Type-specific payload assembly — shift-and-append per field
-                unique case (msg_type)
+                // ------------------------------------------------------------
+                // 3. Type-specific payload fields
+                // ------------------------------------------------------------
+                unique case (active_msg_type)
                     MSG_ADD: begin
-                        if (byte_cnt == 19)
-                            payload.add.side <= side_e'(in_byte);
-                        else if (byte_cnt >= 20 && byte_cnt <= 23)
-                            payload.add.shares <= {payload.add.shares[23:0], in_byte};
-                        // ignore the ASCII stock symbol (bytes 24-31)
-                        else if (byte_cnt >= 32 && byte_cnt <= 35)
-                            payload.add.price <= {payload.add.price[23:0], in_byte};
+                        // side (offset 19, 8 bits) — no swap needed for 1-byte field
+                        if (byte_cnt < 20 && total_bytes >= 20)
+                            order_event.payload.add.side <= side_e'(window[((19 - byte_cnt + 8) * 8) +: 8]);
+                        // shares (offset 20, 32 bits)
+                        if (byte_cnt < 24 && total_bytes >= 24)
+                            order_event.payload.add.shares <= bswap32(window[((20 - byte_cnt + 8) * 8) +: 32]);
+                        // symbol (offset 24, 64 bits) — skipped, not decoded
+                        // price (offset 32, 32 bits)
+                        if (byte_cnt < 36 && total_bytes >= 36)
+                            order_event.payload.add.price <= bswap32(window[((32 - byte_cnt + 8) * 8) +: 32]);
                     end
 
                     MSG_CANCEL: begin
-                        if (byte_cnt >= 19 && byte_cnt <= 22)
-                            payload.cancel.shares <= {payload.cancel.shares[23:0], in_byte};
+                        // cancelled_shares (offset 19, 32 bits)
+                        if (byte_cnt < 23 && total_bytes >= 23)
+                            order_event.payload.cancel.shares <= bswap32(window[((19 - byte_cnt + 8) * 8) +: 32]);
                     end
 
                     MSG_EXECUTE: begin
-                        if (byte_cnt >= 19 && byte_cnt <= 22)
-                            payload.execute.shares <= {payload.execute.shares[23:0], in_byte};
-                        else if (byte_cnt >= 23 && byte_cnt <= 30)
-                            payload.execute.match <= {payload.execute.match[55:0], in_byte};
+                        // executed_shares (offset 19, 32 bits)
+                        if (byte_cnt < 23 && total_bytes >= 23)
+                            order_event.payload.execute.shares <= bswap32(window[((19 - byte_cnt + 8) * 8) +: 32]);
+                        // match_number (offset 23, 64 bits)
+                        if (byte_cnt < 31 && total_bytes >= 31)
+                            order_event.payload.execute.match <= bswap64(window[((23 - byte_cnt + 8) * 8) +: 64]);
                     end
 
                     default: ;
                 endcase
 
-                // Completion check & counter wraparound
-                // Normal finish or instant drop if unsuported message type (length == 0)
-                if ((current_msg_len != '0 && byte_cnt == current_msg_len - 1) ||
-                    (current_msg_len == '0 && byte_cnt > 0)) begin
+                // ------------------------------------------------------------
+                // 4. Message completion & packet boundary recovery
+                // ------------------------------------------------------------
+                if (current_msg_len != '0) begin
+                    if (total_bytes >= {1'b0, current_msg_len}) begin
                         msg_done <= 1'b1;
-                        byte_cnt <= '0;
-                end else begin
-                    byte_cnt <= byte_cnt + 8'd1;
+                        // If tlast coincides with message boundary, reset cleanly;
+                        // otherwise carry leftover bytes into the next cycle
+                        byte_cnt <= s_axis_tlast ? '0 : byte_cnt_next[7:0];
+                    end else begin
+                        if (s_axis_tlast) begin
+                            // Packet ended before message was complete — framing error
+                            framing_error <= 1'b1;
+                            byte_cnt      <= '0;
+                        end else begin
+                            byte_cnt <= total_bytes;
+                        end
+                    end
+                end else if (!framing_error_now) begin
+                    // Unknown message type — pulse done and reset
+                    msg_done <= 1'b1;
+                    byte_cnt <= '0;
                 end
             end
         end
     end
 
     // ------------------------------------------------------------------------
-    // Verification with assert statements - used with SymbiYosys
+    // SVA Assertions (formal verification only)
     // ------------------------------------------------------------------------
+`ifdef FORMAL
+    property p_byte_cnt_bounded;
+        @(posedge clk) disable iff (!rst_n)
+        (byte_cnt > 0) |-> (byte_cnt < current_msg_len);
+    endproperty
+    assert property (p_byte_cnt_bounded) else $error("byte_cnt exceeded valid message length");
 
-    `ifdef FORMAL
-        // byte_cnt never runs past the current message's known length
-        property p_byte_cnt_bounded;
-            @(posedge clk) disable iff (!rst_n)
-            (byte_cnt > 0) |-> (byte_cnt < current_msg_len);
-        endproperty
-        assert property (p_byte_cnt_bounded) else $error("byte_cnt exceeded valid message length or unhandled type");
+    property p_msg_done_one_cycle;
+        @(posedge clk) disable iff (!rst_n)
+        msg_done |=> !msg_done;
+    endproperty
+    assert property (p_msg_done_one_cycle) else $error("msg_done held high 2+ cycles");
 
-        // msg_done pulses exactly one cycle, then drops
-        property p_msg_done_one_cycle;
-            @(posedge clk) disable iff (!rst_n)
-            msg_done |=> !msg_done;
-        endproperty
-        assert property (p_msg_done_one_cycle) else $error("msg_done held high 2+ cycles");
+    property p_cnt_resets_after_done;
+        @(posedge clk) disable iff (!rst_n)
+        (msg_done && s_axis_tlast) |=> (byte_cnt == 0);
+    endproperty
+    assert property (p_cnt_resets_after_done) else $error("byte_cnt did not reset after msg_done+tlast");
 
-        // byte_cnt resets to 0 the cycle after msg_done
-        property p_cnt_resets_after_done;
-            @(posedge clk) disable iff (!rst_n)
-            msg_done |=> (byte_cnt == 0);
-        endproperty
-        assert property (p_cnt_resets_after_done) else $error("byte_cnt did not reset after msg_done");
-
-        // msg_type only ever holds a legal value once a message has started
-        property p_legal_msg_type;
-            @(posedge clk) disable iff (!rst_n)
-            (byte_cnt > 0) |-> (msg_type inside {MSG_ADD, MSG_CANCEL, MSG_EXECUTE});
-        endproperty
-        assert property (p_legal_msg_type) else $error("illegal msg_type mid-message");
-    `endif
+    property p_legal_msg_type;
+        @(posedge clk) disable iff (!rst_n)
+        (byte_cnt > 0) |-> (order_event.msg_type == MSG_ADD ||
+                            order_event.msg_type == MSG_CANCEL ||
+                            order_event.msg_type == MSG_EXECUTE);
+    endproperty
+    assert property (p_legal_msg_type) else $error("illegal msg_type mid-message");
+`endif
 
 endmodule

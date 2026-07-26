@@ -1,9 +1,0 @@
-# running in msg_decoder/src/
-read -formal -D FORMAL itch_lite_pkg.sv
-read -formal -D FORMAL msg_decoder.sv
-prep -top msg_decoder
-
-hierarchy -smtcheck
-rename -witness
-write_jny -no-connections ../model/design.json
-write_rtlil ../model/design.il

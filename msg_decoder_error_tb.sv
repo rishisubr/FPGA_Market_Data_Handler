@@ -2,7 +2,7 @@
 import itch_lite_pkg::*; //[cite: 1]
 /* verilator lint_on IMPORTSTAR */
 
-module msg_decoder_tb;
+module msg_decoder_error_tb;
 
     timeunit 1ns; timeprecision 1ps;
 
@@ -12,7 +12,7 @@ module msg_decoder_tb;
 
     logic rst_n;
 
-    // DUT AXI-Stream Slave interface (matching msg_decoder.sv ports)[cite: 2]
+    // DUT AXI-Stream Slave interface[cite: 2]
     logic [63:0] s_axis_tdata;
     logic        s_axis_tvalid;
     logic [7:0]  s_axis_tkeep;
@@ -27,7 +27,7 @@ module msg_decoder_tb;
     logic        framing_error;
     logic [287:0] order_event_raw; //[cite: 2]
 
-    // Unpack raw vector to structured type defined in itch_lite_pkg[cite: 1, 2]
+    // Unpack raw vector to structured type[cite: 1, 2]
     order_event_t order_event;
     assign order_event = order_event_t'(order_event_raw);
 
@@ -35,11 +35,11 @@ module msg_decoder_tb;
 
     // Waveform dump
     initial begin
-        $dumpfile("dump_directed.vcd");
-        $dumpvars(0, msg_decoder_tb);
+        $dumpfile("dump_error.vcd");
+        $dumpvars(0, msg_decoder_error_tb);
     end
 
-    // Module-scope static queue to prevent Icarus Verilog automatic argument crashes[cite: 3]
+    // Module-scope static queue to prevent Icarus Verilog crashes[cite: 3]
     logic [7:0] tx_queue[$];
 
     // ---------------------------------------------------------------------
@@ -73,47 +73,20 @@ module msg_decoder_tb;
     endtask
 
     // ---------------------------------------------------------------------
-    // Synchronization & Checking Helpers (with NBA race avoidance)
+    // Checking Helpers
     // ---------------------------------------------------------------------
     int errors = 0;
-    task automatic wait_and_check_done();
-        #1; // Step past NBA region
-        if (!msg_done) begin
-            int timeout = 20;
-            while (!msg_done && timeout > 0) begin
-                @(posedge clk);
-                #1;
-                timeout--;
-            end
-        end
-        if (!msg_done) begin
-            $display("FAIL: msg_done did not pulse within timeout!");
-            errors++;
-        end
-    endtask
 
-    task automatic check(string field_name, logic [63:0] actual, logic [63:0] expected);
+    task automatic check_flag(string test_name, logic actual, logic expected);
         if (actual !== expected) begin
-            $display("FAIL: %s = %0d, expected %0d", field_name, actual, expected);
+            $display("FAIL [%s]: Flag = %0b, expected %0b", test_name, actual, expected);
             errors++;
         end else begin
-            $display("PASS: %s = %0d", field_name, actual);
+            $display("PASS [%s]: Flag behaved as expected (%0b)", test_name, actual);
         end
     endtask
 
-    // Standard ITCH Directed Test Vectors[cite: 4]
-    logic [7:0] add_msg [0:35] = '{
-        8'h41,                                                  // msg_type 'A'[cite: 1, 4]
-        8'h00, 8'h01,                                           // stock_locate = 1[cite: 4]
-        8'h00, 8'h01,                                           // tracking_number = 1[cite: 4]
-        8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h64,               // timestamp = 100[cite: 4]
-        8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h00, 8'h01, // order_ref = 1[cite: 4]
-        8'h42,                                                  // side 'B' (buy)[cite: 1, 4]
-        8'h00, 8'h00, 8'h00, 8'h64,                             // shares = 100[cite: 4]
-        8'h41, 8'h41, 8'h50, 8'h4C, 8'h20, 8'h20, 8'h20, 8'h20, // symbol "AAPL    "[cite: 4]
-        8'h00, 8'h07, 8'hA1, 8'h20                              // price = 500000[cite: 4]
-    };
-
+    // Test Vectors
     logic [7:0] cancel_msg [0:22] = '{
         8'h58,                                                  // msg_type 'X'[cite: 1, 4]
         8'h00, 8'h01,                                           // stock_locate = 1[cite: 4]             
@@ -145,56 +118,77 @@ module msg_decoder_tb;
         rst_n <= 1;
         @(posedge clk);
 
-        // ---------------- Add Order ----------------
-        $display("\n--- Sending Add Order ---");
+        // Test 1: Truncated Packet (Framing Error)[cite: 2]
+        $display("\n--- Test 1: Truncated Packet (Framing Error) ---");
         tx_queue = {};
-        for (int i = 0; i < 36; i++) tx_queue.push_back(add_msg[i]);
-        send_message(1'b1);
-        wait_and_check_done();
+        tx_queue.push_back(MSG_ADD); //[cite: 1]
+        for (int i = 1; i < 16; i++) begin
+            tx_queue.push_back(8'hAA);
+        end
         
-        check("msg_type",        order_event.msg_type,          MSG_ADD); //[cite: 1]
-        check("stock_locate",    order_event.stock_locate,      1);
-        check("tracking_number", order_event.tracking_number,   1);
-        check("timestamp",       order_event.timestamp,         100);
-        check("order_ref",       order_event.order_ref,         1);
-        check("side",            order_event.payload.add.side,   SIDE_BUY); //[cite: 1]
-        check("shares",          order_event.payload.add.shares, 100);
-        check("price",           order_event.payload.add.price,  500000);
+        send_message(1'b1);
+        #1;
+
+        check_flag("Truncated Packet -> framing_error asserted", framing_error, 1'b1); //[cite: 2]
+        check_flag("Truncated Packet -> msg_done suppressed",    msg_done,      1'b0); //[cite: 2]
         @(posedge clk);
 
-        // ---------------- Order Cancel ----------------
-        $display("\n--- Sending Cancel Order ---");
+        // Test 2: Post-Framing Error Recovery
+        $display("\n--- Test 2: Clean Recovery After Framing Error ---");
         tx_queue = {};
         for (int i = 0; i < 23; i++) tx_queue.push_back(cancel_msg[i]);
-        send_message(1'b1);
-        wait_and_check_done();
         
-        check("msg_type",         order_event.msg_type,              MSG_CANCEL); //[cite: 1]
-        check("timestamp",        order_event.timestamp,             200);
-        check("order_ref",        order_event.order_ref,             1);
-        check("cancelled_shares", order_event.payload.cancel.shares, 30);
+        send_message(1'b1);
+        #1;
+
+        check_flag("Post-Error Recovery -> framing_error is clear", framing_error, 1'b0); //[cite: 2]
+        check_flag("Post-Error Recovery -> msg_done asserted",      msg_done,      1'b1); //[cite: 2]
+        if (order_event.payload.cancel.shares !== 30) begin
+            $display("FAIL [Post-Error Recovery]: Cancelled shares corrupted (%0d != 30)", order_event.payload.cancel.shares);
+            errors++;
+        end else begin
+            $display("PASS [Post-Error Recovery]: Cancelled shares cleanly decoded (30)");
+        end
         @(posedge clk);
 
-        // ---------------- Order Executed ----------------
-        $display("\n--- Sending Execute Order ---");
+        // Test 3: Unsupported Message Type Drop[cite: 2]
+        $display("\n--- Test 3: Unsupported Message Type Drop ---");
+        tx_queue = {};
+        tx_queue.push_back(8'h5A); // Unknown tag 'Z'
+        for (int i = 1; i < 8; i++) begin
+            tx_queue.push_back(8'hBB);
+        end
+        
+        send_message(1'b1);
+        #1;
+
+        check_flag("Unknown Msg Tag -> msg_done asserted (instant flush)", msg_done,      1'b1); //[cite: 2]
+        check_flag("Unknown Msg Tag -> framing_error suppressed",          framing_error, 1'b0); //[cite: 2]
+        @(posedge clk);
+
+        // Test 4: Post-Flush Recovery
+        $display("\n--- Test 4: Post-Flush Pipeline Recovery ---");
         tx_queue = {};
         for (int i = 0; i < 31; i++) tx_queue.push_back(execute_msg[i]);
-        send_message(1'b1);
-        wait_and_check_done();
         
-        check("msg_type",        order_event.msg_type,               MSG_EXECUTE); //[cite: 1]
-        check("timestamp",       order_event.timestamp,              300);
-        check("order_ref",       order_event.order_ref,              1);
-        check("executed_shares", order_event.payload.execute.shares, 40);
-        check("match_number",    order_event.payload.execute.match,  1000);
+        send_message(1'b1);
+        #1;
+
+        check_flag("Post-Flush Recovery -> msg_done asserted", msg_done, 1'b1); //[cite: 2]
+        if (order_event.payload.execute.match !== 1000) begin
+            $display("FAIL [Post-Flush Recovery]: Match ID corrupted (%0d != 1000)", order_event.payload.execute.match);
+            errors++;
+        end else begin
+            $display("PASS [Post-Flush Recovery]: Match ID cleanly decoded (1000)");
+        end
         @(posedge clk);
 
         $finish;
     end
 
     final begin
-        if (errors == 0) $display("\n=== ALL DIRECTED TESTS PASSED ===");
-        else             $display("\n=== %0d CHECK(S) FAILED ===", errors);
+        if (errors == 0) $display("\n=== ALL ERROR & RECOVERY TESTS PASSED ===");
+        else             $display("\n=== %0d ERROR CHECK(S) FAILED ===", errors);
     end
 
 endmodule
