@@ -1,4 +1,4 @@
-# FMDH: FPGA-Accelerated ITCH Feed Handler and Limit Order Book
+# FMDH: FPGA Market Data Handler
 
 FMDH is a hardware-accelerated NASDAQ ITCH 5.0 feed handler and limit order book (LOB) engine implemented in SystemVerilog. The project explores how exchange data processing can be moved into deterministic FPGA hardware to achieve extremely low-latency market data processing.
 
