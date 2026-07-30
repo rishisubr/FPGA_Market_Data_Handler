@@ -1,4 +1,4 @@
-# FMDH: FPGA Market Data Handler
+# FMDH: FPGA-Accelerated ITCH Feed Handler and Limit Order Book
 
 FMDH is a hardware-accelerated NASDAQ ITCH 5.0 feed handler and limit order book (LOB) engine implemented in SystemVerilog. The project explores how exchange data processing can be moved into deterministic FPGA hardware to achieve extremely low-latency market data processing.
 
@@ -93,3 +93,59 @@ The design separates state storage into three main structures:
 ## Order Tracking
 
 Tracks individual live orders:
+
+```
+MAX_ORDERS = 4096
+```
+
+Each entry stores information required to process future cancellations and executions using the corresponding `order_ref`.
+
+## Price-Level Aggregation
+
+Stores aggregated liquidity buckets:
+
+```
+MAX_PRICE_LEVELS = 4096
+```
+
+Price levels are indexed using a custom hash of:
+
+- `stock_locate`
+- Price
+- Side
+
+This provides constant-time access without requiring large sparse memories.
+
+## Top-of-Book Cache
+
+Maintains active best bid and ask information:
+
+```
+NUM_SYMBOLS = 4096
+```
+
+A dedicated BBO cache provides immediate access to the current market state for each instrument.
+
+---
+
+# Technology and Verification
+
+## Implementation
+
+- **Language:** SystemVerilog
+- **Interface:** AXI4-Stream
+- **Design Style:** Fully synchronous single-clock-domain architecture
+- **Reset:** Active-low reset
+
+## Verification
+
+The design includes simulation and formal verification checks using SystemVerilog Assertions (SVA).
+
+Verified properties include:
+
+- Valid message framing
+- Correct byte-counter behavior
+- Legal state transitions
+- Protection against invalid parser states
+
+The goal of verification is to ensure that every incoming exchange message produces a correct and deterministic hardware state update.
